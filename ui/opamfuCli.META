@@ -1,0 +1,7 @@
+
+package "cli" (
+  archive(byte) = "opamfuCli.cma"
+  archive(native) = "opamfuCli.cmxa"
+  exists_if = "opamfuCli.cma"
+  requires = "opamfu cmdliner"
+)

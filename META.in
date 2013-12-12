@@ -1,0 +1,6 @@
+version = "0.1"
+description = "Functions over OPAM Universes"
+archive(byte) = "opamfu.cma"
+archive(native) = "opamfu.cmxa"
+exists_if = "opamfu.cma"
+requires = "opam.client uri"
