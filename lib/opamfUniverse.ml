@@ -141,9 +141,15 @@ module Pkg = struct
         update;
         url;
       }
-    with Not_found ->
+    with Not_found -> (* TODO: Really? No date = no info? *)
       None
 end
+
+let index_by_repo pkg_idx =
+  OpamPackage.Map.fold (fun pkg (repo,prefix) map ->
+    let pkg_map = try RepoMap.find repo map with Not_found -> OpamPackage.Map.empty in
+    RepoMap.add repo (OpamPackage.Map.add pkg prefix pkg_map) map
+  ) pkg_idx RepoMap.empty
 
 let remove_base_packages pkg_idx =
   OpamPackage.Map.filter (fun pkg _ ->
@@ -191,32 +197,66 @@ let infos repos dates pkg_idx =
   Printf.printf "\n%!";
   result
 
-(* Get the last update timestamp of a package in a given repository *)
-let last_update repo prefix package =
-  let opam_filename = OpamPath.Repository.opam repo prefix package in
-  try
-    let command =
-      [ "git"; "log"; "--reverse"; "--pretty=format:%ct"; "--";
-        "*/" ^ OpamPackage.to_string package ^ "/opam" ] in
-    let return =
-      OpamFilename.in_dir
-        (OpamFilename.dirname_dir (OpamPath.Repository.packages_dir repo))
-        (fun () -> OpamSystem.read_command_output command) in
-    match return with
-    | ts::_ -> float_of_string ts
-    | [] -> raise Not_found
-  with
-  | (OpamSystem.Process_error _ | Failure "float_of_string" | Not_found as e) ->
-    OpamGlobals.warning "last_update of %s failed with %s\n"
-      (OpamPackage.to_string package) (Printexc.to_string e);
-    let opam_stat = Unix.stat (OpamFilename.to_string opam_filename) in
-    opam_stat.Unix.st_mtime
-
 let dates repos pkg_idx =
-  OpamPackage.Map.fold (fun pkg (repo,prefix) map ->
-    let last_update = last_update (RepoMap.find repo repos) prefix pkg in
-    OpamPackage.Map.add pkg last_update map
-  ) pkg_idx OpamPackage.Map.empty
+  let any_opam_path = "*/opam" in
+  let parse_git_commit_times =
+    let rec read_time pkgs found = function
+      | [] -> pkgs,found
+      | ln::rest -> read_file pkgs found (float_of_string ln) rest
+    and read_file pkgs found time = function
+      | [] -> pkgs,found
+      | ""::rest -> read_time pkgs found rest
+      | path::rest ->
+        let suff = String.length any_opam_path - 1 in
+        let path = String.(sub path 0 (length path - suff)) in
+        let slash = try String.rindex path '/' + 1 with Not_found -> 0 in
+        let pkg = String.(sub path slash (length path - slash)) in
+        match OpamPackage.of_string_opt pkg with
+        | Some pkg ->
+          if OpamPackage.Map.mem pkg pkgs
+          then read_file
+            (OpamPackage.Map.remove pkg pkgs)
+            (OpamPackage.Map.add pkg time found)
+            time rest
+          else read_file pkgs found time rest
+        | None -> read_file pkgs found time rest
+    in read_time
+  in
+  let repo_idx = index_by_repo pkg_idx in
+  let missing, found = RepoMap.fold (fun repo pkg_map (missing,found) ->
+    let command = [
+      "git"; "log"; "--name-only"; "--diff-filter=A"; "--reverse";
+      "--pretty=format:%ct"; "--"; any_opam_path;
+    ] in
+    let repo_name = OpamRepositoryName.to_string repo in
+    let repo = RepoMap.find repo repos in
+    try
+      let times = OpamFilename.in_dir
+        (OpamFilename.dirname_dir (OpamPath.Repository.packages_dir repo))
+        (fun () -> OpamSystem.read_command_output command)
+      in
+      let unmatched,found = parse_git_commit_times pkg_map found times in
+      OpamPackage.Map.(fold add unmatched missing),found
+    with (OpamSystem.Process_error _ | Failure "float_of_string" as e) ->
+      OpamGlobals.warning "Date retrieval for %s using" repo_name;
+      OpamGlobals.warning "%s" (String.concat " " command);
+      OpamGlobals.warning "failed with:\n%s" (Printexc.to_string e);
+      (OpamPackage.Map.(fold add pkg_map missing),found)
+  ) repo_idx OpamPackage.Map.(empty, empty) in
+  if OpamPackage.Map.cardinal missing > 0
+  then begin
+    OpamGlobals.warning "Couldn't retrieve creation date for:";
+    OpamPackage.Map.fold (fun pkg prefix map ->
+      OpamGlobals.warning "%s" (OpamPackage.to_string pkg);
+      let (repo,prefix) = OpamPackage.Map.find pkg pkg_idx in
+      let repo = RepoMap.find repo repos in
+      let opam_filename = OpamPath.Repository.opam repo prefix pkg in
+      (* TODO: errors? *)
+      let opam_stat = Unix.stat (OpamFilename.to_string opam_filename) in
+      OpamPackage.Map.add pkg opam_stat.Unix.st_mtime map
+    ) missing found
+  end
+  else found
 
 (* Create an association list (package_name -> reverse_dependencies) *)
 let reverse_dependencies opams =
@@ -319,16 +359,13 @@ let of_repositories ?(preds=[]) index repo_stack =
   ) packages OpamPackage.Map.empty
   in
   let universe_info = mk_universe_info preds index repos pkg_idx opams in
-  let universe = {
+  let universe = { OpamSolver.empty_universe with
     u_packages  = packages;
     u_action    = Depends;
-    u_installed = OpamPackage.Set.empty;
     u_available = packages; (* TODO: ok? check opam's semantics *)
     u_depends   = OpamPackage.Map.map OpamFile.OPAM.depends opams;
     u_depopts   = OpamPackage.Map.map OpamFile.OPAM.depopts opams;
     u_conflicts = OpamPackage.Map.map OpamFile.OPAM.conflicts opams;
-    u_installed_roots = OpamPackage.Set.empty;
-    u_pinned    = OpamPackage.Name.Map.empty;
   } in
   let dep_closure = OpamSolver.dependencies
     ~depopts:(List.mem [Depopt] preds) ~installed:false universe

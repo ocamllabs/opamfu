@@ -80,6 +80,9 @@ val string_of_repository : repository -> string
 (** Can raise Not_found if string is unparseable *)
 val repository_of_string : string -> repository
 
+val index_by_repo :
+  pkg_idx -> (string option OpamTypes.package_map) OpamTypes.repository_name_map
+
 val of_repositories :
   ?preds:pred list list -> index -> repository list -> (string * string) t
 
