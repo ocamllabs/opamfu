@@ -18,11 +18,6 @@
 open Cmdliner
 open OpamfUniverse
 
-type repo_enum =
-| Path_enum
-| Local_enum
-| Opam_enum
-
 let map f x = Term.(pure f $ x)
 
 let rec parse_pred = function
@@ -54,19 +49,8 @@ let index = Arg.(
   ~docv:"INDEX"
   ~doc:"Changes the set of packages for which indices are generated: 'all' or 'where'")
 
-let parse_repos = List.map (function
-  | Path_enum, path -> Path path
-  | Local_enum, local -> Local local
-  | Opam_enum, _ -> Opam
-)
-
 let repositories =
-  let namespaces = Arg.enum [
-    "path", Path_enum;
-    "local", Local_enum;
-    "opam", Opam_enum
-  ] in
-  map parse_repos Arg.(
-    value & pos_all (pair ~sep:':' namespaces string) [Opam_enum,""] & info []
+  map (List.map repository_of_string) Arg.(
+    value & pos_all string ["opam"] & info []
       ~docv:"REPOSITORY"
       ~doc:"The repositories to consider as the universe. Available namespaces are 'path' for local directories, 'local' for named opam remotes, and 'opam' for the current local opam universe.")

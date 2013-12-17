@@ -30,7 +30,13 @@ type 'a pkg = {
   url      : OpamFile.URL.t option;
 }
 
-type repository = Path of string | Local of string | Opam
+type pkg_idx = (OpamTypes.repository_name * string option) OpamTypes.package_map
+
+type repository = [
+| `path of string
+| `local of string
+| `opam
+]
 
 type pred =
 | Tag of string
@@ -124,8 +130,7 @@ module Pkg = struct
         None in
     let title = Printf.sprintf "%s %s" name version in
     try
-      let update =
-        OpamPackage.Map.find pkg dates in
+      let update = OpamPackage.Map.find pkg dates in
       Some {
         name;
         version;
@@ -243,20 +248,34 @@ let mk_universe_info preds index repos pkg_idx opams =
   { repos; preds; index; versions; pkg_idx; max_versions; max_packages;
     reverse_deps; pkgs_infos; pkgs_opams=opams; pkgs_dates }
 
+let pred_sep = ':'
+let repository_ns_sep = ':'
+
+let repository_of_string s = match OpamMisc.split s repository_ns_sep with
+  | "path"::r -> `path String.(concat (make 1 repository_ns_sep) r)
+  | "local"::r -> `local String.(concat (make 1 repository_ns_sep) r)
+  | "opam"::r -> `opam
+  | _::_ | [] -> raise Not_found
+
+let string_of_repository = function
+  | `path p  -> Printf.sprintf "path%c%s" repository_ns_sep p
+  | `local l -> Printf.sprintf "local%c%s" repository_ns_sep l
+  | `opam -> "opam"
+
 (* Generate a universe from a stack of repositories *)
 let of_repositories ?(preds=[]) index repo_stack =
   let t = OpamState.load_state "opam2web" in
   let opam_repos = t.OpamState.Types.repositories in
   let repos,_ = List.fold_left
-    (fun (rmap,repo_priority) -> function
-    | Path path ->
-      let repo_name = OpamRepositoryName.of_string ("path:"^path) in
+    (fun (rmap,repo_priority) repo -> match repo with
+    | `path path ->
+      let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
       RepoMap.add repo_name
         { (OpamRepository.local (OpamFilename.Dir.of_string path))
         with repo_priority; repo_name } rmap,
       repo_priority - 1
-    | Local remote ->
-      let repo_name = OpamRepositoryName.of_string ("local:"^remote) in
+    | `local remote ->
+      let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
       begin
         try
           let repo = RepoMap.find
@@ -269,10 +288,12 @@ let of_repositories ?(preds=[]) index repo_stack =
           Printf.printf "Maybe you wanted the 'path' namespace?\n%!";
           rmap, repo_priority
       end
-    | Opam ->
+    | `opam ->
       List.fold_left (fun (m,i) r ->
-        let k = r.repo_name in
-        let repo_name = OpamRepositoryName.(of_string ("opam:"^(to_string k))) in
+        let k = OpamRepositoryName.to_string r.repo_name in
+        let sep = String.make 1 repository_ns_sep in
+        let repo_name = (string_of_repository repo)^sep^k in
+        let repo_name = OpamRepositoryName.of_string repo_name in
         RepoMap.add repo_name { r with repo_priority = i; repo_name } m, i - 1
       ) (rmap, repo_priority) (OpamRepository.sort opam_repos)
     ) (RepoMap.empty,256) repo_stack

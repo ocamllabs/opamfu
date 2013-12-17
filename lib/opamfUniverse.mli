@@ -26,19 +26,28 @@ type 'a pkg = {
   url : OpamFile.URL.t option;
 }
 
-type repository = Path of string | Local of string | Opam
+type pkg_idx = (OpamTypes.repository_name * string option) OpamTypes.package_map
+
+type repository = [
+| `path of string
+| `local of string
+| `opam
+]
+
 type pred =
-    Tag of string
-  | Depopt
-  | Not of pred
-  | Repo of string
-  | Pkg of string
+| Tag of string
+| Depopt
+| Not of pred
+| Repo of string
+| Pkg of string
+
 type index = Index_pred | Index_all
+
 type 'a t = {
   repos : OpamTypes.repository OpamTypes.repository_name_map;
   preds : pred list list;
   index : index;
-  pkg_idx : (OpamTypes.repository_name * string option) OpamTypes.package_map;
+  pkg_idx : pkg_idx;
   versions : OpamTypes.version_set OpamTypes.name_map;
   max_packages : OpamTypes.package_set;
   max_versions : OpamTypes.version OpamTypes.name_map;
@@ -61,6 +70,15 @@ module Pkg : sig
     OpamTypes.repository ->
     string option -> OpamTypes.package -> (string * string) pkg option
 end
+
+val pred_sep : char
+
+val repository_ns_sep : char
+
+val string_of_repository : repository -> string
+
+(** Can raise Not_found if string is unparseable *)
+val repository_of_string : string -> repository
 
 val of_repositories :
   ?preds:pred list list -> index -> repository list -> (string * string) t
