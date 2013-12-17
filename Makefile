@@ -8,23 +8,28 @@ HAS_CMDLINER := $(shell ocamlfind query cmdliner > /dev/null; echo $$?)
 
 ifneq ($(HAS_CMDLINER),0)
 MLI=lib/*.mli _build/lib/*.cmi
-FLAGS=-pkgs opam.client,uri
+INCS=
+PKGS=opam.client,uri
+TGTS=
 EXTRA_LIB=
 EXTRA_META=
 EXTRA_INSTALL=
 else
 MLI=lib/*.mli ui/*.mli _build/lib/*.cmi _build/ui/*.cmi
-FLAGS=-pkgs opam.client,uri,cmdliner -I ui \
-opamfuCli.cma opamfuCli.cmxa opamfuCli.a
+INCS=-I ui
+PKGS=opam.client,uri,cmdliner
+TGTS=opamfuCli.cma opamfuCli.cmxa opamfuCli.a
 EXTRA_LIB=
 EXTRA_META=ui/opamfuCli.META
 EXTRA_INSTALL= \
 _build/ui/opamfuCli.cma _build/ui/opamfuCli.cmxa _build/ui/opamfuCli.a
 endif
 
+FLAGS=-cflags -w,@f@p@u@40 -pkgs $(PKGS) $(INCS) -I lib -tags "debug"
+OCAMLBUILD=ocamlbuild -use-ocamlfind $(FLAGS)
+
 build: META lib/opamfu.mllib
-	ocamlbuild -use-ocamlfind $(FLAGS) -I lib \
-		$(LIB_NAME).cma $(LIB_NAME).cmxa $(LIB_NAME).a
+	$(OCAMLBUILD) $(LIB_NAME).cma $(LIB_NAME).cmxa $(LIB_NAME).a $(TGTS)
 
 install:
 	ocamlfind install $(FINDLIB_NAME) META \
