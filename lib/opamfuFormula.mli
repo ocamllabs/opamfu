@@ -20,9 +20,9 @@ type 'a expr = Atom of 'a | And of 'a expr list | Or of 'a expr list
 
 type version = OpamPackage.Version.t
 type version_set = OpamPackage.Version.Set.t
+type version_dnf = OpamFormula.version_constraint OpamFormula.dnf
 type version_expr = OpamFormula.version_constraint expr option
-type package_expr = (OpamPackage.Name.t * version_expr) expr
-type t = package_expr option
+type t = (OpamPackage.Name.t * version_expr) expr option
 
 val eval : ('a -> bool) -> 'a expr option -> bool
 
@@ -30,7 +30,7 @@ val eval : ('a -> bool) -> 'a expr option -> bool
     the provided operators.
 *)
 val interpret :
-  ('z -> 'z -> 'z) -> ('z -> 'z -> 'z) -> ('z -> 'x -> 'z) ->
+  ('z -> 'z -> 'z) -> ('z -> 'z -> 'z) -> ('x -> 'z) ->
   'z -> ('x expr option) -> 'z
 
 val map : ('a -> 'b) -> 'a expr -> 'b expr
@@ -39,6 +39,10 @@ val to_opam_formula : 'a expr option -> 'a OpamFormula.formula
 val of_opam_formula : OpamFormula.t -> t
 
 val dnf_of_expr : 'a expr option -> 'a expr option
+
+val expr_of_version_dnf : version_dnf -> version_expr
+
+val simplify_expr : 'a expr option -> 'a expr option
 val simplify : t -> t
 
 val compare : acompare:('a -> 'a -> int) -> 'a expr -> 'a expr -> int
@@ -49,9 +53,16 @@ val sort_formula :
   t -> t
 
 val max_depth : t -> int
+
+val count_width : ('a -> int) -> int -> 'a expr -> int
+val expr_width : 'a expr -> int
 val width : t -> int
 
 val filter_versions : version_expr -> version_set -> version_set
 
 val extremum_of_version_constraint :
   version_set -> OpamFormula.version_constraint -> version option
+
+val dnf_of_version_subset : version_set -> version_set -> version_dnf
+
+val could_satisfy : version_set OpamTypes.name_map -> t -> bool

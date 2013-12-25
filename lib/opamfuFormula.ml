@@ -24,6 +24,7 @@ type 'a expr =
 
 type version = OpamPackage.Version.t
 type version_set = OpamPackage.Version.Set.t
+type version_dnf = OpamFormula.version_constraint OpamFormula.dnf
 type version_expr = OpamFormula.version_constraint expr option
 type package_expr = (OpamPackage.Name.t * version_expr) expr
 type t = package_expr option
@@ -35,12 +36,12 @@ let eval atom =
     | Or dl  -> List.exists eval dl
   in function None -> true | Some ex -> eval ex
 
-let interpret op_and op_or atom x =
-  let rec interpret a = function
-    | Atom x -> atom a x
-    | And cl -> List.fold_right (fun c i -> op_and (interpret a c) i) cl a
-    | Or dl  -> List.fold_right (fun c i -> op_or (interpret a c) i) dl a
-  in function None -> x | Some ex -> interpret x ex
+let interpret op_and op_or atom z =
+  let rec interpret = function
+    | Atom x -> atom x
+    | And cl -> List.fold_right (fun c i -> op_and (interpret c) i) cl z
+    | Or dl  -> List.fold_right (fun c i -> op_or (interpret c) i) dl z
+  in function None -> z | Some ex -> interpret ex
 
 (* TODO: these should probably be inverses *)
 let rec to_opam_formula = function
@@ -106,11 +107,17 @@ let (|||) x y = match x,y with
   | None, x | x, None -> x
   | Some x, Some y -> Some (Or [x; y])
 
+let expr_of_version_dnf vdnf = List.fold_right
+  (fun conjl t -> match conjl with
+  | []  -> t
+  | xs -> (List.fold_right (fun h t -> (Some (Atom h)) &&& t) xs None) ||| t
+  ) vdnf None
+
 let rec fix fn x =
   let x' = fn x in
   if x = x' then x else fix fn x'
 
-let simplify ex =
+let simplify_expr ex =
   (* fold_right is important to converge *)
   let rec step = function
     | None -> None
@@ -120,16 +127,19 @@ let simplify ex =
     | Some (And xs) -> Some (And (List.fold_right (fun x n ->
       match fix step (Some x) with
       | None -> n
-      | Some (And conjl) -> List.rev_append conjl n
+      | Some (And conjl) -> conjl @ n
       | Some ex -> ex::n
     ) xs []))
     | Some (Or xs) -> Some (Or (List.fold_right (fun x n ->
       match fix step (Some x) with
       | None -> n
-      | Some (Or disjl) -> List.rev_append disjl n
+      | Some (Or disjl) -> disjl @ n
       | Some ex -> ex::n
     ) xs []))
   in
+  fix step ex
+
+let simplify ex =
   let open OpamPackage.Name in
   let rec consolidate = function
     | Atom x -> Atom x
@@ -143,7 +153,7 @@ let simplify ex =
         | ex -> map, (consolidate ex)::list
       ) (Map.empty,[]) conjl in
       And (List.fold_left (fun l (name,vf) ->
-        (Atom (name, fix step vf))::l
+        (Atom (name, simplify_expr vf))::l
       ) list (Map.bindings map))
     | Or disjl ->
       let map, list = List.fold_left (fun (map,list) -> function
@@ -156,12 +166,12 @@ let simplify ex =
         | ex -> map, (consolidate ex)::list
       ) (Map.empty,[]) disjl in
       Or (List.fold_left (fun l (name,vf) ->
-        (Atom (name, fix step vf))::l
+        (Atom (name, simplify_expr vf))::l
       ) list (Map.bindings map))
   in
-  match fix step ex with
+  match simplify_expr ex with
   | None -> None
-  | Some ex -> fix step (Some (consolidate ex))
+  | Some ex -> simplify_expr (Some (consolidate ex))
 
 let rec compare_list compare lst lst' = match lst, lst' with
   | [], [] -> 0
@@ -217,16 +227,17 @@ let max_depth =
   function None -> 0 | Some t ->
     loop (function (_,None) -> 1 | (_,Some vf) -> 1 + loop (fun _ -> 1) vf) t
 
-let width =
-  let rec loop awidth w = function
-    | Atom a -> w + (awidth a)
-    | And xs | Or xs -> List.fold_left (loop awidth) w xs
-  in
-  function None -> 0 | Some t ->
-    loop (function
-    | (_,None) -> 1
-    | (_,Some vf) -> max 1 (loop (fun _ -> 1) 0 vf)
-    ) 0 t
+let rec count_width awidth w = function
+  | Atom a -> w + (awidth a)
+  | And xs | Or xs -> List.fold_left (count_width awidth) w xs
+
+let expr_width ex = count_width (fun _ -> 1) 0 ex
+
+let width = function None -> 0 | Some t ->
+  count_width (function
+  | (_,None) -> 1
+  | (_,Some vf) -> max 1 (expr_width vf)
+  ) 0 t
 
 (*
 let filter_versions vf vset = OpamPackage.Version.Set.(
@@ -252,3 +263,42 @@ let extremum_of_version_constraint versions (relop,v) =
     try
       Some (max_elt (filter_versions (Some (Atom (`Leq,v))) versions))
     with Not_found -> None end
+
+let dnf_of_version_subset versions vset =
+  let open OpamPackage.Version in
+  let vs = List.sort compare (Set.elements versions) in
+  let rec one f = function
+    | [] -> f
+    | h::t when Set.mem h vset -> range f h t
+    | _::t -> one f t
+  and range f v = function
+    | [] -> [`Geq,v]::f
+    | h::t when Set.mem h vset -> range f v t
+    | h::t -> one ([`Geq, v; `Lt, h]::f) t
+  in
+  let rec zero f = function
+    | [] -> f
+    | h::t when Set.mem h vset -> zero f t
+    | h::t -> one ([`Lt, h]::f) t
+  in
+  match vs with
+  | [] -> []
+  | h::t when Set.mem h vset -> List.rev (zero [] t)
+  | _::t -> List.rev (one [] t)
+
+let could_satisfy nvsetmap t =
+  let maybe op x y = match x,y with
+    | None, None   -> None
+    | Some x, None | None, Some x -> Some x
+    | Some x, Some y -> Some (op x y)
+  in
+  let known = interpret (maybe (&&)) (maybe (||)) (fun (n,vf) ->
+    try
+      let vset = OpamPackage.Name.Map.find n nvsetmap in
+      Some (eval (fun (relop,v) ->
+        OpamPackage.Version.Set.for_all (fun version ->
+          OpamFormula.eval_relop relop version v
+        ) vset) vf)
+    with Not_found -> None
+  ) None t in
+  match known with None -> true | Some x -> x
