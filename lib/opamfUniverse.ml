@@ -20,14 +20,14 @@ open OpamTypes
 module RepoMap = OpamRepositoryName.Map
 
 type 'a pkg = {
-  name     : string;
-  version  : string;
-  descr    : 'a;
-  synopsis : string;
-  href     : Uri.t;
-  title    : string;
-  update   : float;
-  url      : OpamFile.URL.t option;
+  name      : string;
+  version   : string;
+  descr     : 'a;
+  synopsis  : string;
+  href      : Uri.t;
+  title     : string;
+  published : float;
+  url       : OpamFile.URL.t option;
 }
 
 type pkg_idx = (OpamTypes.repository_name * string option) OpamTypes.package_map
@@ -133,7 +133,7 @@ module Pkg = struct
         None in
     let title = Printf.sprintf "%s %s" name version in
     try
-      let update = OpamPackage.Map.find pkg dates in
+      let published = OpamPackage.Map.find pkg dates in
       Some {
         name;
         version;
@@ -141,7 +141,7 @@ module Pkg = struct
         synopsis;
         href;
         title;
-        update;
+        published;
         url;
       }
     with Not_found -> (* TODO: Really? No date = no info? *)

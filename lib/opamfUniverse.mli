@@ -22,7 +22,7 @@ type 'a pkg = {
   synopsis : string;
   href : Uri.t;
   title : string;
-  update : float;
+  published : float;
   url : OpamFile.URL.t option;
 }
 
