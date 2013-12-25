@@ -43,15 +43,18 @@ type pred =
 
 type index = Index_pred | Index_all
 
+type pred_dnf = pred OpamFormula.dnf
+
 type 'a t = {
   repos : OpamTypes.repository OpamTypes.repository_name_map;
-  preds : pred list list;
+  preds : pred_dnf;
   index : index;
   pkg_idx : pkg_idx;
   versions : OpamTypes.version_set OpamTypes.name_map;
   max_packages : OpamTypes.package_set;
   max_versions : OpamTypes.version OpamTypes.name_map;
-  reverse_deps : OpamTypes.name_set OpamTypes.name_map;
+  rev_depends : OpamfuFormula.version_dnf OpamTypes.name_map OpamTypes.package_map;
+  rev_depopts : OpamfuFormula.version_dnf OpamTypes.name_map OpamTypes.package_map;
   pkgs_infos : 'a pkg option OpamTypes.package_map;
   pkgs_opams : OpamFile.OPAM.t OpamTypes.package_map;
   pkgs_dates : float OpamTypes.package_map;
@@ -60,8 +63,10 @@ type 'a t = {
 module Repo : sig val links : OpamTypes.repository -> OpamFile.Repo.t end
 
 module Pkg : sig
-  val to_repo : 'a t -> OpamPackage.Map.key -> OpamTypes.repository
-  val are_preds_satisfied : 'a t -> OpamPackage.Map.key -> bool
+  val to_repo : 'a t -> OpamPackage.t -> OpamTypes.repository
+  val are_preds_satisfied :
+    OpamFile.OPAM.t OpamTypes.package_map -> pkg_idx -> pred_dnf ->
+    OpamPackage.t -> bool
   val href :
     ?href_base:Uri.t ->
     OpamPackage.Name.t -> OpamPackage.Version.t -> Uri.t
@@ -83,7 +88,11 @@ val repository_of_string : string -> repository
 val index_by_repo :
   pkg_idx -> (string option OpamTypes.package_map) OpamTypes.repository_name_map
 
+val is_base_package : OpamTypes.package -> bool
+
+val remove_base_packages : 'a OpamTypes.package_map -> 'a OpamTypes.package_map
+
 val of_repositories :
-  ?preds:pred list list -> index -> repository list -> (string * string) t
+  ?preds:pred_dnf -> index -> repository list -> (string * string) t
 
 val map : ('a -> 'b) -> 'a t -> 'b t

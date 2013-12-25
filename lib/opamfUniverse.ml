@@ -47,15 +47,18 @@ type pred =
 
 type index = Index_pred | Index_all
 
+type pred_dnf = pred OpamFormula.dnf
+
 type 'a t = {
   repos       : OpamTypes.repository repository_name_map;
-  preds       : pred list list;
+  preds       : pred_dnf;
   index       : index;
   pkg_idx     : (repository_name * string option) package_map;
   versions    : version_set name_map;
   max_packages: package_set;
   max_versions: version name_map;
-  reverse_deps: name_set name_map;
+  rev_depends : OpamfuFormula.version_dnf name_map package_map;
+  rev_depopts : OpamfuFormula.version_dnf name_map package_map;
   pkgs_infos  : 'a pkg option package_map;
   pkgs_opams  : OpamFile.OPAM.t package_map;
   pkgs_dates  : float package_map;
@@ -76,17 +79,17 @@ module Pkg = struct
     let repo = OpamRepositoryName.Map.find repo_name repos in
     repo
 
-  let are_preds_satisfied universe pkg =
+  let are_preds_satisfied opams pkg_idx preds pkg =
     try
-      let pkg_opam = OpamPackage.Map.find pkg universe.pkgs_opams in
+      let pkg_opam = OpamPackage.Map.find pkg opams in
       let tags = OpamFile.OPAM.tags pkg_opam in
       let rec is_satisfied = function
         | Tag t -> List.mem t tags
         | Repo r ->
-          let (rn,_) = OpamPackage.Map.find pkg universe.pkg_idx in
+          let (rn,_) = OpamPackage.Map.find pkg pkg_idx in
           r = (OpamRepositoryName.to_string rn)
         | Not p -> not (is_satisfied p)
-        | Depopt-> false
+        | Depopt-> false (* TODO: correct? *)
         | Pkg p ->
           let name = OpamPackage.(Name.to_string (name pkg)) in
           p = name
@@ -96,7 +99,7 @@ module Pkg = struct
         | pred::rest ->
           if List.for_all is_satisfied pred then true else aux rest
       in
-      if universe.preds = [] then true else aux universe.preds
+      if preds = [] then true else aux preds
     with Not_found -> false
 
   let href ?href_base name version =
@@ -143,7 +146,24 @@ module Pkg = struct
       }
     with Not_found -> (* TODO: Really? No date = no info? *)
       None
+
 end
+
+let opam_universe_of_packages_and_opams packages opams = {
+  OpamSolver.empty_universe with
+    u_packages  = packages;
+    u_action    = Depends;
+    u_available = packages; (* TODO: ok? check opam's semantics *)
+    u_depends   = OpamPackage.Map.map OpamFile.OPAM.depends opams;
+    u_depopts   = OpamPackage.Map.map OpamFile.OPAM.depopts opams;
+    u_conflicts = OpamPackage.Map.map OpamFile.OPAM.conflicts opams;
+  }
+
+let package_set_of_map m = OpamPackage.(Set.of_list (Map.keys m))
+
+let to_opam_universe t = opam_universe_of_packages_and_opams
+  (package_set_of_map t.pkg_idx)
+  t.pkgs_opams
 
 let index_by_repo pkg_idx =
   OpamPackage.Map.fold (fun pkg (repo,prefix) map ->
@@ -151,11 +171,11 @@ let index_by_repo pkg_idx =
     RepoMap.add repo (OpamPackage.Map.add pkg prefix pkg_map) map
   ) pkg_idx RepoMap.empty
 
+let is_base_package pkg =
+  List.mem (OpamPackage.name pkg) OpamState.base_packages
+
 let remove_base_packages pkg_idx =
-  OpamPackage.Map.filter (fun pkg _ ->
-    let name = OpamPackage.name pkg in
-    not (OpamMisc.starts_with ~prefix:"base" (OpamPackage.Name.to_string name))
-  ) pkg_idx
+  OpamPackage.Map.filter (fun pkg _ -> not (is_base_package pkg)) pkg_idx
 
 let versions pkg_idx =
   OpamPackage.Map.fold (fun nv _ map ->
@@ -258,35 +278,75 @@ let dates repos pkg_idx =
   end
   else found
 
-(* Create an association list (package_name -> reverse_dependencies) *)
-let reverse_dependencies opams =
-  let revdeps_tbl: (name, name) Hashtbl.t = Hashtbl.create 300 in
-  (* Fill a hash table with reverse dependencies (required by...) *)
-  OpamPackage.Map.iter (fun pkg opam ->
-    let depends = OpamFile.OPAM.depends opam in
-    List.iter (fun (depname,_) ->
-      Hashtbl.add revdeps_tbl depname (OpamPackage.name pkg)
-    ) (OpamFormula.atoms depends)
-  ) opams;
-  let names =
-    Hashtbl.fold (fun name _ acc -> name :: acc) revdeps_tbl [] in
-  (* Build the association list *)
-  List.fold_left (fun acc name ->
-    let revdeps = Hashtbl.find_all revdeps_tbl name in
-    let names = OpamPackage.Name.Set.of_list revdeps in
-    OpamPackage.Name.Map.add name names acc
-  ) OpamPackage.Name.Map.empty names
+(* Create a reverse version constraint map
+   (package -> package_name -> version_constraint) *)
+let reverse_deps formulas pkg_idx versions =
+  let open OpamPackage in
+  let add_version map pkg revdep =
+    let name = name revdep in
+    let version = version revdep in
+    let revmap =
+      try Map.find pkg map
+      with Not_found -> Name.Map.empty
+    in
+    let revdepvs =
+      try Name.Map.find name revmap
+      with Not_found -> Version.Set.empty
+    in
+    Map.add pkg
+      (Name.Map.add name
+         Version.Set.(add version revdepvs)
+         revmap)
+      map
+  in
+  let depnames_of_formula f = List.fold_left (fun depset (name,_) ->
+    if is_base_package (create name Version.pinned)
+    then depset
+    else Name.Set.add name depset
+  ) Name.Set.empty (OpamFormula.atoms f)
+  in
+  let add_satisfiers pkg f = Name.Set.fold (fun name map ->
+    Version.Set.fold (fun v map ->
+      let nvsetmap = Name.Map.singleton name (Version.Set.singleton v) in
+      if OpamfuFormula.(could_satisfy nvsetmap (of_opam_formula f))
+      then add_version map (create name v) pkg
+      else map
+    ) (Name.Map.find name versions) map
+  ) in
+  let revdeps = Map.fold (fun pkg f deps ->
+    add_satisfiers pkg f (depnames_of_formula f) deps
+  ) formulas Map.empty in
+  Map.map (Name.Map.mapi (fun name subset ->
+    OpamfuFormula.dnf_of_version_subset (Name.Map.find name versions) subset
+  )) revdeps
 
 let mk_universe_info preds index repos pkg_idx opams =
   let pkg_idx = remove_base_packages pkg_idx in
   let versions = versions pkg_idx in
   let max_versions = max_versions versions in
   let max_packages = max_packages max_versions in
-  let reverse_deps = reverse_dependencies opams in
+  let depends = OpamPackage.Map.map OpamFile.OPAM.depends opams in
+  let rev_depends = reverse_deps depends pkg_idx versions in
+  let depopts = OpamPackage.Map.map OpamFile.OPAM.depopts opams in
+  let rev_depopts = reverse_deps depopts pkg_idx versions in
   let pkgs_dates = dates repos pkg_idx in
   let pkgs_infos = infos repos pkgs_dates pkg_idx in
   { repos; preds; index; versions; pkg_idx; max_versions; max_packages;
-    reverse_deps; pkgs_infos; pkgs_opams=opams; pkgs_dates }
+    rev_depends; rev_depopts; pkgs_infos; pkgs_opams=opams; pkgs_dates }
+
+let pred_sep = ':'
+let repository_ns_sep = ':'
+
+let repository_of_string s = match OpamMisc.split s repository_ns_sep with
+  | "path"::r -> `path String.(concat (make 1 repository_ns_sep) r)
+  | "local"::r -> `local String.(concat (make 1 repository_ns_sep) r)
+  | "opam"::r -> `opam
+  | _::_ | [] -> raise Not_found
+
+let string_of_repository = function
+  | `path p  -> Printf.sprintf "path%c%s" repository_ns_sep p
+  | `local l -> Printf.sprintf "local%c%s" repository_ns_sep l
+  | `opam -> "opam"
 
 let pred_sep = ':'
 let repository_ns_sep = ':'
@@ -358,19 +418,11 @@ let of_repositories ?(preds=[]) index repo_stack =
       map
   ) packages OpamPackage.Map.empty
   in
-  let universe_info = mk_universe_info preds index repos pkg_idx opams in
-  let universe = { OpamSolver.empty_universe with
-    u_packages  = packages;
-    u_action    = Depends;
-    u_available = packages; (* TODO: ok? check opam's semantics *)
-    u_depends   = OpamPackage.Map.map OpamFile.OPAM.depends opams;
-    u_depopts   = OpamPackage.Map.map OpamFile.OPAM.depopts opams;
-    u_conflicts = OpamPackage.Map.map OpamFile.OPAM.conflicts opams;
-  } in
+  let universe = opam_universe_of_packages_and_opams packages opams in
   let dep_closure = OpamSolver.dependencies
     ~depopts:(List.mem [Depopt] preds) ~installed:false universe
     (OpamPackage.Set.filter
-       (Pkg.are_preds_satisfied universe_info) packages)
+       (Pkg.are_preds_satisfied opams pkg_idx preds) packages)
   in
   let packages = OpamPackage.Set.of_list dep_closure in
   let pkg_idx = OpamPackage.Map.filter
