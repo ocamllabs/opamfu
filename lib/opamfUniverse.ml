@@ -115,7 +115,7 @@ module Pkg = struct
   let get_info ~dates repo prefix pkg =
     let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
     let version = OpamPackage.Version.to_string (OpamPackage.version pkg) in
-    let href = href ~href_base:Uri.(of_string "pkg/")
+    let href = href ~href_base:Uri.(of_string "packages/")
       (OpamPackage.name pkg) (OpamPackage.version pkg) in
     let descr = OpamFile.Descr.safe_read
       (OpamPath.Repository.descr repo prefix pkg) in
