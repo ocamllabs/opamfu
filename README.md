@@ -4,10 +4,13 @@ opamfu
 **opamfu** is a library of utility functions operating over an OPAM
  universe.
 
+The latest release of **opamfu** is available via
+[opam](http://opam.ocaml.org). Simply run `opam install opamfu` to install.
+
 ### Dependencies
 
-- opam [github.com/OCamlPro/opam](https://github.com/OCamlPro/opam)
-- uri [github.com/avsm/ocaml-uri](https://github.com/avsm/ocaml-uri)
+- opam [github.com/ocaml/opam](https://github.com/ocaml/opam) 1.1.1 or later
+- uri [github.com/avsm/ocaml-uri](https://github.com/avsm/ocaml-uri) 1.13.11 or later
 
 If you have opam installed:
 ```bash
