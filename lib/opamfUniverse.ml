@@ -17,25 +17,12 @@
 
 open OpamTypes
 
-module RepoMap = OpamRepositoryName.Map
-
-type 'a pkg = {
-  name      : string;
-  version   : string;
-  descr     : 'a;
-  synopsis  : string;
-  href      : Uri.t;
-  title     : string;
-  published : float;
-  url       : OpamFile.URL.t option;
-}
-
 type pkg_idx = (OpamTypes.repository_name * string option) OpamTypes.package_map
 
-type repository = [
-| `path of string
-| `local of string
-| `opam
+type repo_ref = [
+| `Path of string
+| `Local of string
+| `Opam
 ]
 
 type pred =
@@ -45,78 +32,371 @@ type pred =
 | Repo of string
 | Pkg of string
 
-type index = Index_pred | Index_all
-
 type pred_dnf = pred OpamFormula.dnf
 
-type 'a t = {
-  repos       : OpamTypes.repository repository_name_map;
-  preds       : pred_dnf;
-  index       : index;
-  pkg_idx     : (repository_name * string option) package_map;
-  versions    : version_set name_map;
-  max_packages: package_set;
-  max_versions: version name_map;
-  rev_depends : OpamfuFormula.version_dnf name_map package_map;
-  rev_depopts : OpamfuFormula.version_dnf name_map package_map;
-  pkgs_infos  : 'a pkg option package_map;
-  pkgs_opams  : OpamFile.OPAM.t package_map;
-  pkgs_dates  : float package_map;
-}
+exception Local_remote_not_found of string
+exception Opam_file_not_found of OpamFilename.t
+exception Opam_file_parse_error of OpamFilename.t
 
-module Repo = struct
-  (* Get the repository opam file corresponding to a repo *)
-  let links repo =
-    let repo_file = OpamPath.Repository.repo repo in
-    OpamFile.Repo.safe_read repo_file    
+let pred_sep = ':'
+let repo_ref_ns_sep = ':'
+
+let repo_ref_of_string s = match OpamMisc.split s repo_ref_ns_sep with
+  | "path"::r -> `Path String.(concat (make 1 repo_ref_ns_sep) r)
+  | "local"::r -> `Local String.(concat (make 1 repo_ref_ns_sep) r)
+  | "opam"::r -> `Opam
+  | _::_ | [] -> raise Not_found
+
+let string_of_repo_ref = function
+  | `Path p  -> Printf.sprintf "path%c%s" repo_ref_ns_sep p
+  | `Local l -> Printf.sprintf "local%c%s" repo_ref_ns_sep l
+  | `Opam -> "opam"
+
+let href ?href_base name version =
+  let base = Printf.sprintf "%s/%s.%s/" name name version in
+  let base = Uri.of_string base in
+  match href_base with
+  | None   -> base
+  | Some p -> Uri.resolve "http" p base
+
+let is_base_package pkg =
+  List.mem (OpamPackage.name pkg) OpamState.base_packages
+
+let remove_base_packages pkg_idx =
+  OpamPackage.Map.filter (fun pkg _ -> not (is_base_package pkg)) pkg_idx
+
+let versions_of_packages pkg_set =
+  OpamPackage.Set.fold (fun nv map ->
+    let name = OpamPackage.name nv in
+    let versions =
+      try OpamPackage.Name.Map.find name map
+      with Not_found -> OpamPackage.Version.Set.empty
+    in
+    let versions = OpamPackage.Version.Set.add
+      (OpamPackage.version nv) versions in
+    OpamPackage.Name.Map.add name versions map
+  ) pkg_set OpamPackage.Name.Map.empty
+
+let max_versions_of_versions versions =
+  OpamPackage.Name.Map.map (fun versions ->
+    OpamPackage.Version.Set.max_elt versions
+  ) versions
+
+(* Create a reverse version constraint map
+   (package -> package_name -> version_constraint) *)
+let reverse_deps formulas versions =
+  let open OpamPackage in
+  let add_version map pkg revdep =
+    let name = name revdep in
+    let version = version revdep in
+    let revmap =
+      try Map.find pkg map
+      with Not_found -> Name.Map.empty
+    in
+    let revdepvs =
+      try Name.Map.find name revmap
+      with Not_found -> Version.Set.empty
+    in
+    Map.add pkg
+      (Name.Map.add name
+         Version.Set.(add version revdepvs)
+         revmap)
+      map
+  in
+  let depnames_of_formula f = List.fold_left (fun depset (name,_) ->
+    if is_base_package (create name Version.pinned)
+    then depset
+    else Name.Set.add name depset
+  ) Name.Set.empty (OpamFormula.atoms f)
+  in
+  let add_satisfiers pkg f = Name.Set.fold (fun name map ->
+    Version.Set.fold (fun v map ->
+      let nvsetmap = Name.Map.singleton name (Version.Set.singleton v) in
+      if OpamfuFormula.(could_satisfy nvsetmap (of_opam_formula f))
+      then add_version map (create name v) pkg
+      else map
+    ) (Name.Map.find name versions) map
+  ) in
+  let revdeps = Map.fold (fun pkg f deps ->
+    add_satisfiers pkg f (depnames_of_formula f) deps
+  ) formulas Map.empty in
+  Map.map (Name.Map.mapi (fun name subset ->
+    OpamfuFormula.dnf_of_version_subset (Name.Map.find name versions) subset
+  )) revdeps
+
+let satisfies preds repo package =
+  let rec is_satisfied = function
+    | Tag t  -> List.mem t package#tags
+    | Repo r -> r = (OpamRepositoryName.to_string repo#name)
+    | Not p  -> not (is_satisfied p)
+    | Depopt -> false (* TODO: correct? *)
+    | Pkg p  -> p = package#name
+  in
+  let rec aux = function
+    | [] -> false
+    | pred::rest ->
+      if List.for_all is_satisfied pred then true else aux rest
+  in
+  if preds = [] then true else aux preds
+
+class ['pkg] repo ~repo ~new_pkg =
+  let pkg_prefixes = OpamRepository.packages_with_prefixes repo in
+  let packages = OpamPackage.Map.mapi (fun package prefix ->
+    let opam =
+      let file = OpamPath.Repository.opam repo prefix package in
+      try OpamFile.OPAM.read file with
+      | Not_found -> raise (Opam_file_not_found file)
+    (*Printf.printf "Cannot find an OPAM file for %s, skipping.\n"
+      (OpamPackage.to_string nv);*)
+      | Parsing.Parse_error | OpamSystem.Internal_error _ ->
+        raise (Opam_file_parse_error file)
+  (*Printf.printf "Errors while parsing %s OPAM file, skipping.\n"
+    (OpamPackage.to_string nv);*)
+    in
+    new_pkg ~opam
+  ) pkg_prefixes in
+object (self : 'self)
+  val packages = packages
+  val name = repo.repo_name
+  val priority = repo.repo_priority
+  val repo = repo
+
+  method filter (p : 'self -> 'pkg -> bool) =
+    let packages = OpamPackage.Map.filter (fun _k -> p self) packages in
+    {< packages = packages >}
+
+  method map f =
+    let packages = OpamPackage.Map.map (f self) packages in
+    {< packages = packages >}
+
+  method with_name repo_name =
+    let repo_name = OpamRepositoryName.of_string repo_name in
+    {< repo = { repo with repo_name }; name = repo_name >}
+  method with_priority priority =
+    {< repo = { repo with repo_priority=priority }; priority = priority >}
+
+  method prefix package = OpamPackage.Map.find package pkg_prefixes
+
+  method packages = packages
+  method opam     = repo
+
+  method name     = OpamRepositoryName.to_string name
+  method priority = priority
+  method kind     = repo.repo_kind
+  method address  = repo.repo_address
+  method root     = repo.repo_root
 end
 
+class virtual linked_repo ~repo = object (self)
+  val links = lazy (
+    OpamFile.Repo.safe_read (OpamPath.Repository.repo repo)
+  )
+
+  method links = Lazy.force links (* TODO: fields? *)
+end
+
+class opam_package ~opam =
+  let name = OpamFile.OPAM.name opam in
+  let version = OpamFile.OPAM.version opam in
+  let package = OpamPackage.create name version in
+  let name = OpamPackage.Name.to_string name in
+  let version = OpamPackage.Version.to_string version in
+  let href = href ~href_base:Uri.(of_string "packages/") name version in
+  let title = Printf.sprintf "%s %s" name version in
+  let depends = OpamFile.OPAM.depends opam in
+  let depopts = OpamFile.OPAM.depopts opam in
+  let tags = OpamFile.OPAM.tags opam in
+object
+  method opam        = opam
+
+  method depends     = depends
+  method depopts     = depopts
+
+  method package     = package
+  method name        = name
+  method version     = version
+  method href        = href
+  method title       = title
+  method tags        = tags
+end
+
+let package_set_of_map m = OpamPackage.(Set.of_list (Map.keys m))
+
+let opam_universe packages =
+  let package_set = package_set_of_map packages in
+  { OpamSolver.empty_universe with
+    u_packages  = package_set;
+    u_action    = Depends;
+    u_available = package_set; (* TODO: ok? check opam's semantics *)
+    u_depends   = OpamPackage.Map.map (fun (_,p) -> p#depends)   packages;
+    u_depopts   = OpamPackage.Map.map (fun (_,p) -> p#depopts)   packages;
+    u_conflicts = OpamPackage.Map.map (fun (_,p) -> p#conflicts) packages;
+  }
+
+class ['repo,'pkg] universe = object (self)
+  val repos        = OpamRepositoryName.Map.empty
+  val packages : ('repo * 'pkg) OpamPackage.Map.t Lazy.t =
+    lazy OpamPackage.Map.empty
+  val package_set  = lazy OpamPackage.Set.empty
+  val versions     = lazy OpamPackage.Name.Map.empty
+  val max_versions = lazy OpamPackage.Name.Map.empty
+
+  method load_repos repos =
+    let repo_map = OpamRepositoryName.Map.map (fun r -> r#opam) repos in
+    let pkg_idx = OpamRepository.package_index repo_map in
+    let pkgs_by_repo = OpamPackage.Map.fold (fun pkg (repo,_) map ->
+      let pkg_set =
+        try OpamRepositoryName.Map.find repo map
+        with Not_found -> OpamPackage.Set.empty
+      in
+      OpamRepositoryName.Map.add repo (OpamPackage.Set.add pkg pkg_set) map
+    ) pkg_idx OpamRepositoryName.Map.empty
+    in
+
+    let repos = OpamRepositoryName.(Map.(map (fun r ->
+      let pset = find (of_string r#name) pkgs_by_repo in
+      r#filter (fun _r p -> OpamPackage.Set.mem p#package pset)
+    ) repos)) in
+    let packages = lazy (OpamRepositoryName.Map.fold (fun _ repo m ->
+      OpamPackage.Map.(fold (fun k v a -> add k (repo,v) a) repo#packages m)
+    ) repos OpamPackage.Map.empty) in
+    let package_set = lazy (package_set_of_map (Lazy.force packages)) in
+    let versions = lazy (versions_of_packages (Lazy.force package_set)) in
+    let max_versions = lazy (max_versions_of_versions (Lazy.force versions)) in
+
+    {<
+      repos        = repos;
+      packages     = packages;
+      package_set  = package_set;
+      versions     = versions;
+      max_versions = max_versions;
+    >}
+
+  method add_repo (repo : 'repo) = self#load_repos
+    OpamRepositoryName.(Map.add (of_string repo#name) repo repos)
+
+  method push_repo (repo : 'repo) =
+    let priority = 10 + OpamRepositoryName.Map.fold (fun _ r a ->
+      max r#priority a
+    ) repos 0 in
+    self#add_repo (repo#with_priority priority)
+
+  method map_repos f = self#load_repos (OpamRepositoryName.Map.map f repos)
+  method map f =
+    self#load_repos (OpamRepositoryName.Map.map (fun r -> r#map f) repos)
+
+  method filter_repos p =
+    self#load_repos (OpamRepositoryName.Map.filter (fun _k -> p) repos)
+
+  method filter ?(depopts=false) p =
+    let packages = Lazy.force packages in
+    let package_set = Lazy.force package_set in
+    let universe = opam_universe packages in
+    let dep_closure = OpamSolver.dependencies ~depopts ~installed:false universe
+      (OpamPackage.Set.filter (fun pkg ->
+        let repo, pkg = OpamPackage.Map.find pkg packages in
+        p repo pkg
+       ) package_set) in
+    let package_set = OpamPackage.Set.of_list dep_closure in
+    self#map_repos (fun r -> r#filter (fun _r p ->
+      OpamPackage.Set.mem p#package package_set
+    ))
+
+  method repos        = repos
+  method package pkg  = OpamPackage.Map.find pkg self#packages
+  method packages     = Lazy.force packages
+  method package_set  = Lazy.force package_set
+  method versions     = Lazy.force versions
+  method max_versions = Lazy.force max_versions
+end
+
+(*
+let universe_of_repo_stack repo_stack =
+  let t = OpamState.load_state "opamfu" in
+  let opam_repos = t.OpamState.Types.repositories in
+  let repos,_ = List.fold_left
+    (fun (rmap,repo_priority) repo -> match repo with
+    | `Path path ->
+      let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
+      OpamRepository.Map.add repo_name
+        (repo,{
+          (OpamRepository.local (OpamFilename.Dir.of_string path))
+               with repo_priority; repo_name;
+        }) rmap,
+      repo_priority - 1
+    | `Local remote ->
+      let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
+      begin
+        try
+          let repo = OpamRepository.Map.find
+            (OpamRepositoryName.of_string remote) opam_repos in
+          OpamRepository.Map.add repo_name
+            (repo,{ repo with repo_priority; repo_name }) rmap,
+          repo_priority - 1
+        with Not_found -> raise (Local_remote_not_found remote)
+      (*Printf.printf "Local opam remote '%s' not found, skipping.\n%!" remote;
+        Printf.printf "Maybe you wanted the 'path' namespace?\n%!";
+        rmap, repo_priority
+      *)
+      end
+    | `Opam ->
+      List.fold_left (fun (m,i) r ->
+        let k = OpamRepositoryName.to_string r.repo_name in
+        let repo_name = Printf.sprintf "%s%c%s"
+          (string_of_repository repo) repository_ns_sep k in
+        let repo_name = OpamRepositoryName.of_string repo_name in
+        RepoMap.add repo_name
+          (repo,{ r with repo_priority = i; repo_name }) m, i - 1
+      ) (rmap, repo_priority) (OpamRepository.sort opam_repos)
+    ) (RepoMap.empty,64) repo_stack
+  in
+*)
+(*
+class virtual published_repo = object
+  method virtual packages : string option OpamPackage.Map.t
+  method publication pkg =
+end
+*)
+(*
+class virtual published_package = object (self : 'self)
+  method virtual pkg  : OpamTypes.package
+  method virtual repo : [< publication : OpamTypes.package -> float; ..>,'self] universe
+  method published = self#repo#publication self#pkg
+end
+*)
+(*
+class md_text : string -> object
+  method md : string
+end
+*)
+(*
+class ['text] described_package : synopsis : string -> body : string -> object
+  method synopsis : 'text
+  method body : 'text
+end
+*)
+(*
+class downloadable_package : opam_url : OpamFile.URL.t -> object
+  method url      : Uri.t
+  method mirrors  : Uri.t list
+  method kind     : string (* TODO: variant? *)
+  method checksum : string option
+end
+*)
+(*
+class standard_package = object
+  inherit opam_package
+  inherit [md_text] described_package
+  inherit downloadable_package
+end
+*)
+(*
 module Pkg = struct
-  (* Get the repository corresponding to a package in a universe *)
-  let to_repo universe pkg =
-    let { pkg_idx; repos } = universe in
-    let repo_name, _ = OpamPackage.Map.find pkg pkg_idx in
-    let repo = OpamRepositoryName.Map.find repo_name repos in
-    repo
-
-  let are_preds_satisfied opams pkg_idx preds pkg =
-    try
-      let pkg_opam = OpamPackage.Map.find pkg opams in
-      let tags = OpamFile.OPAM.tags pkg_opam in
-      let rec is_satisfied = function
-        | Tag t -> List.mem t tags
-        | Repo r ->
-          let (rn,_) = OpamPackage.Map.find pkg pkg_idx in
-          r = (OpamRepositoryName.to_string rn)
-        | Not p -> not (is_satisfied p)
-        | Depopt-> false (* TODO: correct? *)
-        | Pkg p ->
-          let name = OpamPackage.(Name.to_string (name pkg)) in
-          p = name
-      in
-      let rec aux = function
-        | [] -> false
-        | pred::rest ->
-          if List.for_all is_satisfied pred then true else aux rest
-      in
-      if preds = [] then true else aux preds
-    with Not_found -> false
-
-  let href ?href_base name version =
-    let name = OpamPackage.Name.to_string name in
-    let version = OpamPackage.Version.to_string version in
-    let base = Printf.sprintf "%s/%s.%s/" name name version in
-    let base = Uri.of_string base in
-    match href_base with
-    | None   -> base
-    | Some p -> Uri.resolve "http" p base
-
   (* Build a record representing information about a package *)
   let get_info ~dates repo prefix pkg =
     let name = OpamPackage.Name.to_string (OpamPackage.name pkg) in
     let version = OpamPackage.Version.to_string (OpamPackage.version pkg) in
-    let href = href ~href_base:Uri.(of_string "packages/")
-      (OpamPackage.name pkg) (OpamPackage.version pkg) in
+    let href = href ~href_base:Uri.(of_string "packages/") name version in
     let descr = OpamFile.Descr.safe_read
       (OpamPath.Repository.descr repo prefix pkg) in
     let synopsis = OpamFile.Descr.synopsis descr in
@@ -131,7 +411,6 @@ module Pkg = struct
         Some (OpamFile.URL.read file)
       else
         None in
-    let title = Printf.sprintf "%s %s" name version in
     try
       let published = OpamPackage.Map.find pkg dates in
       Some {
@@ -148,60 +427,8 @@ module Pkg = struct
       None
 
 end
-
-let opam_universe_of_packages_and_opams packages opams = {
-  OpamSolver.empty_universe with
-    u_packages  = packages;
-    u_action    = Depends;
-    u_available = packages; (* TODO: ok? check opam's semantics *)
-    u_depends   = OpamPackage.Map.map OpamFile.OPAM.depends opams;
-    u_depopts   = OpamPackage.Map.map OpamFile.OPAM.depopts opams;
-    u_conflicts = OpamPackage.Map.map OpamFile.OPAM.conflicts opams;
-  }
-
-let package_set_of_map m = OpamPackage.(Set.of_list (Map.keys m))
-
-let to_opam_universe t = opam_universe_of_packages_and_opams
-  (package_set_of_map t.pkg_idx)
-  t.pkgs_opams
-
-let index_by_repo pkg_idx =
-  OpamPackage.Map.fold (fun pkg (repo,prefix) map ->
-    let pkg_map = try RepoMap.find repo map with Not_found -> OpamPackage.Map.empty in
-    RepoMap.add repo (OpamPackage.Map.add pkg prefix pkg_map) map
-  ) pkg_idx RepoMap.empty
-
-let is_base_package pkg =
-  List.mem (OpamPackage.name pkg) OpamState.base_packages
-
-let remove_base_packages pkg_idx =
-  OpamPackage.Map.filter (fun pkg _ -> not (is_base_package pkg)) pkg_idx
-
-let versions pkg_idx =
-  OpamPackage.Map.fold (fun nv _ map ->
-    let name = OpamPackage.name nv in
-    let versions, map =
-      try
-        let versions = OpamPackage.Name.Map.find name map in
-        let map = OpamPackage.Name.Map.remove name map in
-        versions, map
-      with Not_found ->
-        OpamPackage.Version.Set.empty, map in
-    let versions = OpamPackage.Version.Set.add
-      (OpamPackage.version nv) versions in
-    OpamPackage.Name.Map.add name versions map
-  ) pkg_idx OpamPackage.Name.Map.empty
-
-let max_versions versions =
-  OpamPackage.Name.Map.map (fun versions ->
-    OpamPackage.Version.Set.max_elt versions
-  ) versions
-
-let max_packages max_versions =
-  OpamPackage.Name.Map.fold (fun name version set ->
-    OpamPackage.Set.add (OpamPackage.create name version) set
-  ) max_versions OpamPackage.Set.empty
-
+*)
+(*
 let infos repos dates pkg_idx =
   let n = OpamPackage.Map.cardinal pkg_idx in
   let c = ref 1 in
@@ -216,7 +443,8 @@ let infos repos dates pkg_idx =
   ) pkg_idx OpamPackage.Map.empty in
   Printf.printf "\n%!";
   result
-
+*)
+(*
 let dates repos pkg_idx =
   let any_opam_path = "*/opam" in
   let parse_git_commit_times =
@@ -277,161 +505,4 @@ let dates repos pkg_idx =
     ) missing found
   end
   else found
-
-(* Create a reverse version constraint map
-   (package -> package_name -> version_constraint) *)
-let reverse_deps formulas pkg_idx versions =
-  let open OpamPackage in
-  let add_version map pkg revdep =
-    let name = name revdep in
-    let version = version revdep in
-    let revmap =
-      try Map.find pkg map
-      with Not_found -> Name.Map.empty
-    in
-    let revdepvs =
-      try Name.Map.find name revmap
-      with Not_found -> Version.Set.empty
-    in
-    Map.add pkg
-      (Name.Map.add name
-         Version.Set.(add version revdepvs)
-         revmap)
-      map
-  in
-  let depnames_of_formula f = List.fold_left (fun depset (name,_) ->
-    if is_base_package (create name Version.pinned)
-    then depset
-    else Name.Set.add name depset
-  ) Name.Set.empty (OpamFormula.atoms f)
-  in
-  let add_satisfiers pkg f = Name.Set.fold (fun name map ->
-    Version.Set.fold (fun v map ->
-      let nvsetmap = Name.Map.singleton name (Version.Set.singleton v) in
-      if OpamfuFormula.(could_satisfy nvsetmap (of_opam_formula f))
-      then add_version map (create name v) pkg
-      else map
-    ) (Name.Map.find name versions) map
-  ) in
-  let revdeps = Map.fold (fun pkg f deps ->
-    add_satisfiers pkg f (depnames_of_formula f) deps
-  ) formulas Map.empty in
-  Map.map (Name.Map.mapi (fun name subset ->
-    OpamfuFormula.dnf_of_version_subset (Name.Map.find name versions) subset
-  )) revdeps
-
-let mk_universe_info preds index repos pkg_idx opams =
-  let pkg_idx = remove_base_packages pkg_idx in
-  let versions = versions pkg_idx in
-  let max_versions = max_versions versions in
-  let max_packages = max_packages max_versions in
-  let depends = OpamPackage.Map.map OpamFile.OPAM.depends opams in
-  let rev_depends = reverse_deps depends pkg_idx versions in
-  let depopts = OpamPackage.Map.map OpamFile.OPAM.depopts opams in
-  let rev_depopts = reverse_deps depopts pkg_idx versions in
-  let pkgs_dates = dates repos pkg_idx in
-  let pkgs_infos = infos repos pkgs_dates pkg_idx in
-  { repos; preds; index; versions; pkg_idx; max_versions; max_packages;
-    rev_depends; rev_depopts; pkgs_infos; pkgs_opams=opams; pkgs_dates }
-
-let pred_sep = ':'
-let repository_ns_sep = ':'
-
-let repository_of_string s = match OpamMisc.split s repository_ns_sep with
-  | "path"::r -> `path String.(concat (make 1 repository_ns_sep) r)
-  | "local"::r -> `local String.(concat (make 1 repository_ns_sep) r)
-  | "opam"::r -> `opam
-  | _::_ | [] -> raise Not_found
-
-let string_of_repository = function
-  | `path p  -> Printf.sprintf "path%c%s" repository_ns_sep p
-  | `local l -> Printf.sprintf "local%c%s" repository_ns_sep l
-  | `opam -> "opam"
-
-let pred_sep = ':'
-let repository_ns_sep = ':'
-
-let repository_of_string s = match OpamMisc.split s repository_ns_sep with
-  | "path"::r -> `path String.(concat (make 1 repository_ns_sep) r)
-  | "local"::r -> `local String.(concat (make 1 repository_ns_sep) r)
-  | "opam"::r -> `opam
-  | _::_ | [] -> raise Not_found
-
-let string_of_repository = function
-  | `path p  -> Printf.sprintf "path%c%s" repository_ns_sep p
-  | `local l -> Printf.sprintf "local%c%s" repository_ns_sep l
-  | `opam -> "opam"
-
-(* Generate a universe from a stack of repositories *)
-let of_repositories ?(preds=[]) index repo_stack =
-  let t = OpamState.load_state "opam2web" in
-  let opam_repos = t.OpamState.Types.repositories in
-  let repos,_ = List.fold_left
-    (fun (rmap,repo_priority) repo -> match repo with
-    | `path path ->
-      let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
-      RepoMap.add repo_name
-        { (OpamRepository.local (OpamFilename.Dir.of_string path))
-        with repo_priority; repo_name } rmap,
-      repo_priority - 1
-    | `local remote ->
-      let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
-      begin
-        try
-          let repo = RepoMap.find
-            (OpamRepositoryName.of_string remote) opam_repos in
-          RepoMap.add repo_name
-            { repo with repo_priority; repo_name } rmap,
-          repo_priority - 1
-        with Not_found ->
-          Printf.printf "Local opam remote '%s' not found, skipping.\n%!" remote;
-          Printf.printf "Maybe you wanted the 'path' namespace?\n%!";
-          rmap, repo_priority
-      end
-    | `opam ->
-      List.fold_left (fun (m,i) r ->
-        let k = OpamRepositoryName.to_string r.repo_name in
-        let sep = String.make 1 repository_ns_sep in
-        let repo_name = (string_of_repository repo)^sep^k in
-        let repo_name = OpamRepositoryName.of_string repo_name in
-        RepoMap.add repo_name { r with repo_priority = i; repo_name } m, i - 1
-      ) (rmap, repo_priority) (OpamRepository.sort opam_repos)
-    ) (RepoMap.empty,256) repo_stack
-  in
-  let pkg_idx = OpamRepository.package_index repos in
-  let packages = OpamPackage.Set.of_list (OpamPackage.Map.keys pkg_idx) in
-  let opams = OpamPackage.Set.fold (fun nv map ->
-    try
-      let repo, prefix = OpamPackage.Map.find nv pkg_idx in
-      let repo = OpamRepositoryName.Map.find repo repos in
-      let file = OpamPath.Repository.opam repo prefix nv in
-      let opam = OpamFile.OPAM.read file in
-      OpamPackage.Map.add nv opam map
-    with
-    | Not_found ->
-      Printf.printf "Cannot find an OPAM file for %s, skipping.\n"
-        (OpamPackage.to_string nv);
-      map
-    | Parsing.Parse_error | OpamSystem.Internal_error _ ->
-      Printf.printf "Errors while parsing %s OPAM file, skipping.\n"
-        (OpamPackage.to_string nv);
-      map
-  ) packages OpamPackage.Map.empty
-  in
-  let universe = opam_universe_of_packages_and_opams packages opams in
-  let dep_closure = OpamSolver.dependencies
-    ~depopts:(List.mem [Depopt] preds) ~installed:false universe
-    (OpamPackage.Set.filter
-       (Pkg.are_preds_satisfied opams pkg_idx preds) packages)
-  in
-  let packages = OpamPackage.Set.of_list dep_closure in
-  let pkg_idx = OpamPackage.Map.filter
-    (fun k _ -> OpamPackage.Set.mem k packages) pkg_idx in
-  mk_universe_info preds index repos pkg_idx opams
-
-let map f u = 
-  { u with pkgs_infos=OpamPackage.Map.map (function
-  | None -> None
-  | Some x -> Some { x with descr = f x.descr }
-  ) u.pkgs_infos
-  }
+*)
