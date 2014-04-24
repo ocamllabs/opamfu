@@ -300,7 +300,7 @@ let reverse_deps formulas pkg_idx versions =
       map
   in
   let depnames_of_formula f = List.fold_left (fun depset (name,_) ->
-    if is_base_package (create name Version.pinned)
+    if List.mem name OpamState.base_packages
     then depset
     else Name.Set.add name depset
   ) Name.Set.empty (OpamFormula.atoms f)
