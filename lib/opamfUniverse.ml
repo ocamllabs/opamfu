@@ -300,7 +300,7 @@ let reverse_deps formulas pkg_idx versions =
       map
   in
   let depnames_of_formula f = List.fold_left (fun depset (name,_) ->
-    if is_base_package (create name Version.pinned)
+    if List.mem name OpamState.base_packages
     then depset
     else Name.Set.add name depset
   ) Name.Set.empty (OpamFormula.atoms f)
@@ -364,6 +364,7 @@ let string_of_repository = function
 
 (* Generate a universe from a stack of repositories *)
 let of_repositories ?(preds=[]) index repo_stack =
+  OpamGlobals.root_dir := OpamGlobals.default_opam_dir;
   let t = OpamState.load_state "opam2web" in
   let opam_repos = t.OpamState.Types.repositories in
   let repos,_ = List.fold_left
