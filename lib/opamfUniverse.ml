@@ -364,6 +364,7 @@ let string_of_repository = function
 
 (* Generate a universe from a stack of repositories *)
 let of_repositories ?(preds=[]) index repo_stack =
+  OpamGlobals.root_dir := OpamGlobals.default_opam_dir;
   let t = OpamState.load_state "opam2web" in
   let opam_repos = t.OpamState.Types.repositories in
   let repos,_ = List.fold_left
