@@ -306,12 +306,18 @@ let reverse_deps formulas pkg_idx versions =
   ) Name.Set.empty (OpamFormula.atoms f)
   in
   let add_satisfiers pkg f = Name.Set.fold (fun name map ->
+    let versions =
+      try Name.Map.find name versions
+      with Not_found ->
+        OpamGlobals.warning "Missing dependency %s in package %s"
+          (OpamPackage.Name.to_string name) (OpamPackage.to_string pkg);
+        OpamPackage.Version.Set.empty in
     Version.Set.fold (fun v map ->
       let nvsetmap = Name.Map.singleton name (Version.Set.singleton v) in
       if OpamfuFormula.(could_satisfy nvsetmap (of_opam_formula f))
       then add_version map (create name v) pkg
       else map
-    ) (Name.Map.find name versions) map
+          ) versions map
   ) in
   let revdeps = Map.fold (fun pkg f deps ->
     add_satisfiers pkg f (depnames_of_formula f) deps
