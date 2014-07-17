@@ -331,9 +331,15 @@ let mk_universe_info preds index repos pkg_idx opams =
   let versions = versions pkg_idx in
   let max_versions = max_versions versions in
   let max_packages = max_packages max_versions in
-  let depends = OpamPackage.Map.map OpamFile.OPAM.depends opams in
+  let depends =
+    OpamPackage.Map.map
+      (fun opam -> OpamTypesBase.filter_deps (OpamFile.OPAM.depends opam))
+      opams in
   let rev_depends = reverse_deps depends pkg_idx versions in
-  let depopts = OpamPackage.Map.map OpamFile.OPAM.depopts opams in
+  let depopts =
+    OpamPackage.Map.map
+      (fun opam -> OpamTypesBase.filter_deps (OpamFile.OPAM.depopts opam))
+      opams in
   let rev_depopts = reverse_deps depopts pkg_idx versions in
   let pkgs_dates = dates repos pkg_idx in
   let pkgs_infos = infos repos pkgs_dates pkg_idx in
