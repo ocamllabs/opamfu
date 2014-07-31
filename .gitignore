@@ -1,3 +1,4 @@
 META
 lib/opamfu.mllib
 _build
+lib/version.ml
