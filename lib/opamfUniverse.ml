@@ -360,20 +360,6 @@ let string_of_repository = function
   | `local l -> Printf.sprintf "local%c%s" repository_ns_sep l
   | `opam -> "opam"
 
-let pred_sep = ':'
-let repository_ns_sep = ':'
-
-let repository_of_string s = match OpamMisc.split s repository_ns_sep with
-  | "path"::r -> `path String.(concat (make 1 repository_ns_sep) r)
-  | "local"::r -> `local String.(concat (make 1 repository_ns_sep) r)
-  | "opam"::r -> `opam
-  | _::_ | [] -> raise Not_found
-
-let string_of_repository = function
-  | `path p  -> Printf.sprintf "path%c%s" repository_ns_sep p
-  | `local l -> Printf.sprintf "local%c%s" repository_ns_sep l
-  | `opam -> "opam"
-
 (* Generate a universe from a stack of repositories *)
 let of_repositories ?(preds=[]) index repo_stack =
   OpamGlobals.root_dir := OpamGlobals.default_opam_dir;
