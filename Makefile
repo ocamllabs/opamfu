@@ -9,7 +9,7 @@ HAS_CMDLINER := $(shell ocamlfind query cmdliner > /dev/null; echo $$?)
 ifneq ($(HAS_CMDLINER),0)
 MLI=lib/*.mli _build/lib/*.cmi
 INCS=
-PKGS=opam.client,uri
+PKGS=opam-lib.client,uri
 TGTS=
 EXTRA_LIB=
 EXTRA_META=
@@ -17,7 +17,7 @@ EXTRA_INSTALL=
 else
 MLI=lib/*.mli ui/*.mli _build/lib/*.cmi _build/ui/*.cmi
 INCS=-I ui
-PKGS=opam.client,uri,cmdliner
+PKGS=opam-lib.client,uri,cmdliner
 TGTS=opamfuCli.cma opamfuCli.cmxa opamfuCli.a
 EXTRA_LIB=
 EXTRA_META=ui/opamfuCli.META
