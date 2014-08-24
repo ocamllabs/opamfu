@@ -22,7 +22,7 @@ type 'a pkg = {
   synopsis : string;
   href : Uri.t;
   title : string;
-  published : float;
+  published : float option;
   url : OpamFile.URL.t option;
 }
 
@@ -55,7 +55,7 @@ type 'a t = {
   max_versions : OpamTypes.version OpamTypes.name_map;
   rev_depends : OpamfuFormula.version_dnf OpamTypes.name_map OpamTypes.package_map;
   rev_depopts : OpamfuFormula.version_dnf OpamTypes.name_map OpamTypes.package_map;
-  pkgs_infos : 'a pkg option OpamTypes.package_map;
+  pkgs_infos : 'a pkg OpamTypes.package_map;
   pkgs_opams : OpamFile.OPAM.t OpamTypes.package_map;
   pkgs_dates : float OpamTypes.package_map;
 }
@@ -73,7 +73,7 @@ module Pkg : sig
   val get_info :
     dates:float OpamPackage.Map.t ->
     OpamTypes.repository ->
-    string option -> OpamTypes.package -> (string * string) pkg option
+    string option -> OpamTypes.package -> (string * string) pkg
 end
 
 val pred_sep : char

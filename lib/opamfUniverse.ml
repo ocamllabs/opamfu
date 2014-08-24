@@ -26,7 +26,7 @@ type 'a pkg = {
   synopsis  : string;
   href      : Uri.t;
   title     : string;
-  published : float;
+  published : float option;
   url       : OpamFile.URL.t option;
 }
 
@@ -59,7 +59,7 @@ type 'a t = {
   max_versions: version name_map;
   rev_depends : OpamfuFormula.version_dnf name_map package_map;
   rev_depopts : OpamfuFormula.version_dnf name_map package_map;
-  pkgs_infos  : 'a pkg option package_map;
+  pkgs_infos  : 'a pkg package_map;
   pkgs_opams  : OpamFile.OPAM.t package_map;
   pkgs_dates  : float package_map;
 }
@@ -132,21 +132,19 @@ module Pkg = struct
       else
         None in
     let title = Printf.sprintf "%s %s" name version in
-    try
-      let published = OpamPackage.Map.find pkg dates in
-      Some {
-        name;
-        version;
-        descr;
-        synopsis;
-        href;
-        title;
-        published;
-        url;
-      }
-    with Not_found -> (* TODO: Really? No date = no info? *)
-      None
-
+    let published =
+      try Some (OpamPackage.Map.find pkg dates)
+      with Not_found -> None
+    in {
+      name;
+      version;
+      descr;
+      synopsis;
+      href;
+      title;
+      published;
+      url;
+    }
 end
 
 let opam_universe_of_packages_and_opams packages opams = {
@@ -429,8 +427,6 @@ let of_repositories ?(preds=[]) index repo_stack =
   mk_universe_info preds index repos pkg_idx opams
 
 let map f u = 
-  { u with pkgs_infos=OpamPackage.Map.map (function
-  | None -> None
-  | Some x -> Some { x with descr = f x.descr }
-  ) u.pkgs_infos
-  }
+  { u with pkgs_infos=OpamPackage.Map.map (fun x ->
+    { x with descr = f x.descr }
+  ) u.pkgs_infos}
