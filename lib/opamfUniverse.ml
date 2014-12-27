@@ -172,7 +172,7 @@ let index_by_repo pkg_idx =
   ) pkg_idx RepoMap.empty
 
 let is_base_package pkg =
-  List.mem (OpamPackage.name pkg) OpamState.base_packages
+  List.mem (OpamPackage.name pkg) OpamState.static_base_packages
 
 let remove_base_packages pkg_idx =
   OpamPackage.Map.filter (fun pkg _ -> not (is_base_package pkg)) pkg_idx
@@ -300,7 +300,7 @@ let reverse_deps formulas pkg_idx versions =
       map
   in
   let depnames_of_formula f = List.fold_left (fun depset (name,_) ->
-    if List.mem name OpamState.base_packages
+    if List.mem name OpamState.static_base_packages
     then depset
     else Name.Set.add name depset
   ) Name.Set.empty (OpamFormula.atoms f)
