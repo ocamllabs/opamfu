@@ -1,0 +1,7 @@
+PKG opam-lib
+PKG uri
+PKG cmdliner
+
+B _build/lib
+
+S lib
