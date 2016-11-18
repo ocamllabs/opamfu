@@ -8,11 +8,9 @@ homepage: "https://github.com/ocamllabs/opamfu"
 license: "ISC"
 tags: [
 ]
-build: [
-  [make "build"]
-  [make "install"]
-]
-remove: [[make "uninstall"]]
+build: [make "build"]
+install: [make "install"]
+remove: [make "uninstall"]
 depends: [
   "ocamlfind"
   "opam-lib" { >= "1.2.0" }
