@@ -67,7 +67,7 @@ type 'a t = {
 module Repo = struct
   (* Get the repository opam file corresponding to a repo *)
   let links repo =
-    let repo_file = OpamPath.Repository.repo repo in
+    let repo_file = OpamRepositoryPath.repo repo in
     OpamFile.Repo.safe_read repo_file    
 end
 
@@ -118,15 +118,15 @@ module Pkg = struct
     let href = href ~href_base:Uri.(of_string "packages/")
       (OpamPackage.name pkg) (OpamPackage.version pkg) in
     let descr = OpamFile.Descr.safe_read
-      (OpamPath.Repository.descr repo prefix pkg) in
+      (OpamRepositoryPath.descr repo prefix pkg) in
     let synopsis = OpamFile.Descr.synopsis descr in
     let descr_markdown = OpamFile.Descr.full descr in
     let descr =
-      match OpamMisc.cut_at descr_markdown '\n' with
+      match OpamStd.String.cut_at descr_markdown '\n' with
       | None       -> descr_markdown, ""
       | Some (s,d) -> s, d in
     let url =
-      let file = OpamPath.Repository.url repo prefix pkg in
+      let file = OpamRepositoryPath.url repo prefix pkg in
       if OpamFilename.exists file then
         Some (OpamFile.URL.read file)
       else
@@ -250,25 +250,25 @@ let dates repos pkg_idx =
     let repo = RepoMap.find repo repos in
     try
       let times = OpamFilename.in_dir
-        (OpamFilename.dirname_dir (OpamPath.Repository.packages_dir repo))
+        (OpamFilename.dirname_dir (OpamRepositoryPath.packages_dir repo))
         (fun () -> OpamSystem.read_command_output command)
       in
       let unmatched,found = parse_git_commit_times pkg_map found times in
       OpamPackage.Map.(fold add unmatched missing),found
     with (OpamSystem.Process_error _ | Failure "float_of_string" as e) ->
-      OpamGlobals.warning "Date retrieval for %s using" repo_name;
-      OpamGlobals.warning "%s" (String.concat " " command);
-      OpamGlobals.warning "failed with:\n%s" (Printexc.to_string e);
+      OpamConsole.warning "Date retrieval for %s using" repo_name;
+      OpamConsole.warning "%s" (String.concat " " command);
+      OpamConsole.warning "failed with:\n%s" (Printexc.to_string e);
       (OpamPackage.Map.(fold add pkg_map missing),found)
   ) repo_idx OpamPackage.Map.(empty, empty) in
   if OpamPackage.Map.cardinal missing > 0
   then begin
-    OpamGlobals.warning "Couldn't retrieve creation date for:";
+    OpamConsole.warning "Couldn't retrieve creation date for:";
     OpamPackage.Map.fold (fun pkg prefix map ->
-      OpamGlobals.warning "%s" (OpamPackage.to_string pkg);
+      OpamConsole.warning "%s" (OpamPackage.to_string pkg);
       let (repo,prefix) = OpamPackage.Map.find pkg pkg_idx in
       let repo = RepoMap.find repo repos in
-      let opam_filename = OpamPath.Repository.opam repo prefix pkg in
+      let opam_filename = OpamRepositoryPath.opam repo prefix pkg in
       (* TODO: errors? *)
       let opam_stat = Unix.stat (OpamFilename.to_string opam_filename) in
       OpamPackage.Map.add pkg opam_stat.Unix.st_mtime map
@@ -307,7 +307,7 @@ let reverse_deps formulas pkg_idx versions =
     let versions =
       try Name.Map.find name versions
       with Not_found ->
-        OpamGlobals.warning "Missing dependency %s in package %s"
+        OpamConsole.warning "Missing dependency %s in package %s"
           (OpamPackage.Name.to_string name) (OpamPackage.to_string pkg);
         OpamPackage.Version.Set.empty in
     Version.Set.fold (fun v map ->
@@ -330,13 +330,17 @@ let mk_universe_info preds index repos pkg_idx opams =
   let max_versions = max_versions versions in
   let max_packages = max_packages max_versions in
   let depends =
-    OpamPackage.Map.map
-      (fun opam -> OpamTypesBase.filter_deps (OpamFile.OPAM.depends opam))
+    OpamPackage.Map.map (fun opam ->
+        OpamTypesBase.filter_deps
+          ~build:true ~test:true ~doc:true ~dev:false
+          (OpamFile.OPAM.depends opam))
       opams in
   let rev_depends = reverse_deps depends pkg_idx versions in
   let depopts =
-    OpamPackage.Map.map
-      (fun opam -> OpamTypesBase.filter_deps (OpamFile.OPAM.depopts opam))
+    OpamPackage.Map.map (fun opam ->
+        OpamTypesBase.filter_deps
+          ~build:true ~test:true ~doc:true ~dev:false
+          (OpamFile.OPAM.depopts opam))
       opams in
   let rev_depopts = reverse_deps depopts pkg_idx versions in
   let pkgs_dates = dates repos pkg_idx in
@@ -347,7 +351,7 @@ let mk_universe_info preds index repos pkg_idx opams =
 let pred_sep = ':'
 let repository_ns_sep = ':'
 
-let repository_of_string s = match OpamMisc.split s repository_ns_sep with
+let repository_of_string s = match OpamStd.String.split s repository_ns_sep with
   | "path"::r -> `path String.(concat (make 1 repository_ns_sep) r)
   | "local"::r -> `local String.(concat (make 1 repository_ns_sep) r)
   | "opam"::r -> `opam
@@ -360,16 +364,19 @@ let string_of_repository = function
 
 (* Generate a universe from a stack of repositories *)
 let of_repositories ?(preds=[]) index repo_stack =
-  OpamGlobals.root_dir := OpamGlobals.default_opam_dir;
-  let t = OpamState.load_state "opam2web" in
+  OpamStateConfig.update ~root_dir:OpamStateConfig.(default.root_dir) ();
+  let t = OpamState.load_state "opam2web" OpamStateConfig.(!r.current_switch)in
   let opam_repos = t.OpamState.Types.repositories in
   let repos,_ = List.fold_left
     (fun (rmap,repo_priority) repo -> match repo with
     | `path path ->
       let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
       RepoMap.add repo_name
-        { (OpamRepository.local (OpamFilename.Dir.of_string path))
-        with repo_priority; repo_name } rmap,
+        { repo_name;
+          repo_root = OpamFilename.Dir.of_string path;
+          repo_address  = ("<none>", None);
+          repo_kind     = `local;
+          repo_priority } rmap,
       repo_priority - 1
     | `local remote ->
       let repo_name = OpamRepositoryName.of_string (string_of_repository repo) in
@@ -401,7 +408,7 @@ let of_repositories ?(preds=[]) index repo_stack =
     try
       let repo, prefix = OpamPackage.Map.find nv pkg_idx in
       let repo = OpamRepositoryName.Map.find repo repos in
-      let file = OpamPath.Repository.opam repo prefix nv in
+      let file = OpamRepositoryPath.opam repo prefix nv in
       let opam = OpamFile.OPAM.read file in
       OpamPackage.Map.add nv opam map
     with
@@ -417,7 +424,7 @@ let of_repositories ?(preds=[]) index repo_stack =
   in
   let universe = opam_universe_of_packages_and_opams packages opams in
   let dep_closure = OpamSolver.dependencies
-    ~depopts:(List.mem [Depopt] preds) ~installed:false universe
+    ~build:true ~depopts:(List.mem [Depopt] preds) ~installed:false universe
     (OpamPackage.Set.filter
        (Pkg.are_preds_satisfied opams pkg_idx preds) packages)
   in
